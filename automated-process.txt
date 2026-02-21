@@ -1,0 +1,416 @@
+================================================================================
+  SONAR PR ANALYSIS — AUTOMATED PROCESS
+  Claude Code + GitHub MCP + SonarQube MCP
+================================================================================
+
+This document describes the fully automated process for running SonarCloud
+analysis on a PR, entirely from Claude Code without manual browser intervention.
+
+────────────────────────────────────────────────────────────────────────────────
+PREREQUISITES (one-time setup, already done)
+────────────────────────────────────────────────────────────────────────────────
+
+  1. SonarCloud project configured (Aadhin_mmstudio)
+  2. GitHub Actions workflow (.github/workflows/sonarcloud.yml) on main
+  3. sonar-project.properties on main
+  4. SONAR_TOKEN secret added in GitHub repo settings
+  5. GitHub PAT with permissions:
+     - Contents: Read and Write
+     - Workflows: Read and Write
+     - Actions: Read and Write
+     - Pull requests: Read and Write
+     - Commit statuses: Read
+     - Metadata: Read
+  6. MCP servers configured in Claude Code:
+     - sonarqube (mcp/sonarqube Docker image)
+     - github (ghcr.io/github/github-mcp-server Docker image)
+
+────────────────────────────────────────────────────────────────────────────────
+THE AUTOMATED FLOW
+────────────────────────────────────────────────────────────────────────────────
+
+When user says: "Commit and create PR for sonar analysis on branch X"
+
+Claude does:
+
+  STEP 1: COMMIT & PUSH
+    - Stage and commit changes locally (git add + git commit)
+    - Push to remote branch
+
+  STEP 2: CREATE PR
+    - Use GitHub MCP: create_pull_request
+    - Target: main (or whatever base branch user specifies)
+    - Note the PR number from response
+
+  STEP 3: POLL FOR CI COMPLETION
+    - Loop with 30-second intervals:
+      a. Call GitHub MCP: pull_request_read(method: "get_status", pullNumber: X)
+      b. Check the "state" field:
+         - "pending" → CI still running, wait 30s and retry
+         - "success" → CI passed, proceed to Step 4
+         - "failure" → CI failed, investigate and fix
+         - "error" → something broke, investigate
+      c. Max wait: 5 minutes (10 iterations)
+
+    - Fallback polling (if GitHub status not available):
+      a. Call SonarQube MCP: get_project_quality_gate_status(pullRequest: "X")
+      b. If returns data → analysis complete
+      c. If returns error → not ready yet, wait and retry
+
+  STEP 4: PULL SONAR REPORT
+    - Call SonarQube MCP: get_project_quality_gate_status(pullRequest: "X")
+      → Get overall pass/fail and condition details
+    - Call SonarQube MCP: search_sonar_issues_in_projects(pullRequestId: "X")
+      → Get all issues with severity, rule, file, line number
+
+  STEP 5: PRESENT RESULTS
+    - Show quality gate status (PASSED/FAILED)
+    - Show failing conditions (maintainability, coverage, etc.)
+    - Show issue table with severity, rule, file, line, description
+
+  STEP 6 (OPTIONAL): FIX & RETRY
+    - If issues found, Claude can:
+      a. Read the flagged files
+      b. Fix the issues
+      c. Push fixes to the same branch
+      d. PR automatically re-triggers CI
+      e. Poll again and show updated report
+
+────────────────────────────────────────────────────────────────────────────────
+POLLING STRATEGY DETAILS
+────────────────────────────────────────────────────────────────────────────────
+
+  Primary: GitHub MCP pull_request_read(get_status)
+    Returns: { state: "pending" | "success" | "failure" | "error" }
+    Pros: Direct CI status, works even if SonarCloud is slow
+    Cons: Needs "Commit statuses: Read" PAT permission
+
+  Fallback: SonarQube MCP get_project_quality_gate_status(pullRequest)
+    Returns: Quality gate data when ready, error when not
+    Pros: No extra permissions needed
+    Cons: Only shows status after SonarCloud processes (slight delay after CI)
+
+  Interval: 30 seconds
+  Max attempts: 10 (5 minutes total)
+  Typical analysis time: 1-2 minutes
+
+────────────────────────────────────────────────────────────────────────────────
+IMPORTANT NOTES
+────────────────────────────────────────────────────────────────────────────────
+
+  - Always create feature branches for testing, never use develop or main
+  - PR analysis works on SonarCloud free tier (branch analysis does NOT)
+  - sonar-project.properties must exist on the BASE branch (main)
+  - .github/workflows/sonarcloud.yml must exist on the BASE branch (main)
+  - The workflow triggers on: push to main/develop-go AND PRs targeting main
+  - Close/delete test PRs after analysis to keep the repo clean
+
+────────────────────────────────────────────────────────────────────────────────
+DRY RUN RESULTS (2026-02-21)
+────────────────────────────────────────────────────────────────────────────────
+
+  Branch: feature/sonar-dry-run (from main)
+  PR: #2 — "Dry Run: SonarCloud automated PR analysis test"
+  File: test-dummy/dry-run-buggy.ts (50 lines, intentionally buggy)
+
+  EXECUTION LOG:
+    Step 1: Wrote buggy file locally                        ✓
+    Step 2: git commit + git push                           ✓
+    Step 3: Created PR #2 via GitHub MCP                    ✓
+    Step 4: Polled CI status (4 polls × 30s = ~2 minutes)   ✓
+      - Poll 1 (30s): pending
+      - Poll 2 (60s): pending
+      - Poll 3 (90s): pending
+      - Poll 4 (120s): pending (GitHub) BUT SonarQube MCP returned data!
+    Step 5: Pulled report via SonarQube MCP                 ✓
+
+  OBSERVATION: GitHub commit status stayed "pending" even after SonarCloud
+  had results. The SonarQube MCP fallback was more reliable for detecting
+  completion. Recommendation: use BOTH in parallel — SonarQube MCP as
+  primary, GitHub status as secondary.
+
+  QUALITY GATE: FAILED
+    | Condition          | Status | Threshold | Actual |
+    |--------------------|--------|-----------|--------|
+    | Reliability        | FAILED | A         | C      |
+    | Security           | OK     | A         | A      |
+    | Maintainability    | OK     | A         | A      |
+    | Coverage           | FAILED | 80%       | 0%     |
+    | Duplicated Lines   | OK     | 3%        | 0%     |
+    | Security Hotspots  | OK     | 100%      | 100%   |
+
+  ISSUES: 6 found
+    | Severity | Rule  | Line  | Issue                              |
+    |----------|-------|-------|------------------------------------|
+    | CRITICAL | S3776 | 22    | Cognitive Complexity 28 (max 15)   |
+    | CRITICAL | S3504 | 41    | var used — use let or const        |
+    | MAJOR    | S1763 | 46-47 | Unreachable code after return      |
+    | MINOR    | S7748 | 13    | Zero fraction in number (0.20)     |
+    | MINOR    | S7748 | 15    | Zero fraction in number (0.10)     |
+    | MINOR    | S7748 | 17    | Zero fraction in number (0.10)     |
+
+  TOTAL TIME: ~2.5 minutes (commit to report)
+  MANUAL STEPS: ZERO (fully automated via Claude Code)
+
+────────────────────────────────────────────────────────────────────────────────
+LESSONS FROM DRY RUN
+────────────────────────────────────────────────────────────────────────────────
+
+  1. SonarQube MCP fallback is more reliable than GitHub commit status for
+     detecting analysis completion. Use both in parallel.
+
+  2. The full loop (commit → push → PR → poll → report) takes ~2.5 minutes.
+     Most of that is CI execution time, not Claude overhead.
+
+  3. PR analysis on free tier works perfectly — only new code is analyzed.
+
+  4. GitHub commit status API may not reflect SonarCloud check runs properly.
+     This could be a GitHub App vs commit status distinction. The SonarCloud
+     GitHub App reports via "check runs" not "commit statuses", which is a
+     different API endpoint.
+
+  5. The git remote needs PAT-based URL for push to work from Claude Code:
+     git remote set-url origin https://USER:PAT@github.com/USER/REPO.git
+     This is needed because Claude Code runs in a non-interactive terminal.
+
+================================================================================
+FEED TO CLAUDE — INSTRUCTIONS FOR AUTOMATED SONAR PR ANALYSIS
+================================================================================
+
+You are Claude Code. This section gives you everything you need to run the
+SonarCloud PR analysis flow autonomously. Read this BEFORE executing.
+
+────────────────────────────────────────────────────────────────────────────────
+CONTEXT
+────────────────────────────────────────────────────────────────────────────────
+
+This project (mmstudio) has SonarCloud integration via:
+  - GitHub Actions workflow at .github/workflows/sonarcloud.yml (on main branch)
+  - sonar-project.properties (on main branch)
+  - SonarCloud project key: Aadhin_mmstudio
+  - SonarCloud org: aadhin
+
+You have TWO MCP servers available:
+  - sonarqube: reads SonarCloud data (issues, quality gates, metrics)
+  - github: interacts with GitHub (create files, branches, PRs)
+
+The flow: commit → push → create PR → poll for completion → pull report
+
+────────────────────────────────────────────────────────────────────────────────
+REDUCING USER APPROVALS
+────────────────────────────────────────────────────────────────────────────────
+
+During the first dry run, the user had to approve almost every tool call.
+This breaks the "zero manual intervention" goal. To fix this:
+
+OPTION 1: User runs Claude Code with --dangerously-skip-permissions
+  This auto-approves everything. Fast but risky. Not recommended for prod.
+
+OPTION 2: Add allowed tools to .claude/settings.local.json (RECOMMENDED)
+  This has ALREADY been done for this project. The following are auto-approved:
+
+  Git commands:
+    "Bash(git status:*)", "Bash(git add:*)", "Bash(git commit:*)",
+    "Bash(git push:*)", "Bash(git fetch:*)", "Bash(git checkout:*)",
+    "Bash(git stash:*)", "Bash(git branch:*)", "Bash(git log:*)",
+    "Bash(git diff:*)", "Bash(git diff-tree:*)", "Bash(git remote:*)",
+    "Bash(git pull:*)"
+
+  Polling:
+    "Bash(sleep:*)"
+
+  SonarQube MCP (all analysis tools):
+    "mcp__sonarqube__get_project_quality_gate_status",
+    "mcp__sonarqube__search_sonar_issues_in_projects",
+    "mcp__sonarqube__search_my_sonarqube_projects",
+    "mcp__sonarqube__get_component_measures",
+    "mcp__sonarqube__show_rule",
+    "mcp__sonarqube__analyze_code_snippet"
+
+  GitHub MCP (all repo interaction tools):
+    "mcp__github__get_me", "mcp__github__get_file_contents",
+    "mcp__github__create_or_update_file", "mcp__github__push_files",
+    "mcp__github__create_branch", "mcp__github__create_pull_request",
+    "mcp__github__pull_request_read", "mcp__github__update_pull_request",
+    "mcp__github__list_commits", "mcp__github__get_commit",
+    "mcp__github__list_branches"
+
+  Docker:
+    "Bash(docker pull:*)", "Bash(docker images:*)"
+
+  File: .claude/settings.local.json (already configured)
+  The user still gets prompted for non-git Bash commands and file writes.
+  This is the right balance of speed and safety.
+
+OPTION 3: User approves per-session using /permissions command
+  Less permanent but works for one-off runs.
+
+────────────────────────────────────────────────────────────────────────────────
+EXACT EXECUTION STEPS — FOLLOW THESE IN ORDER
+────────────────────────────────────────────────────────────────────────────────
+
+When the user says something like:
+  "Commit these changes and create a PR for sonar analysis"
+  "Run sonar on this code"
+  "Create PR to [branch] and get sonar report"
+
+DO THIS:
+
+  STEP 1: VERIFY GIT REMOTE HAS AUTH
+    Run: git remote get-url origin
+    If URL is https://github.com/... (no PAT), it will fail on push.
+    Check if PAT is embedded. If not, ask user for their GitHub PAT and run:
+      git remote set-url origin https://USER:PAT@github.com/USER/REPO.git
+    DO NOT hardcode PATs — ask the user each time if not already set.
+
+  STEP 2: CREATE BRANCH (if not already on a feature branch)
+    NEVER push directly to main or develop branches for testing.
+    Create: git checkout -b feature/sonar-<descriptive-name>
+
+  STEP 3: COMMIT CHANGES
+    - git add <specific files>  (never use git add -A or git add .)
+    - git commit -m "descriptive message"
+    - Do NOT amend existing commits unless explicitly asked.
+
+  STEP 4: PUSH
+    Run: git push origin <branch-name>
+    If push fails with auth error, go back to Step 1.
+
+  STEP 5: CREATE PR
+    Use GitHub MCP: create_pull_request
+    Parameters:
+      owner: "aadhin"
+      repo: "mmstudio"
+      title: concise PR title
+      head: your feature branch name
+      base: the target branch user specified (usually "main")
+      body: brief summary of changes
+    SAVE the PR number from the response — you need it for polling.
+
+  STEP 6: POLL FOR COMPLETION
+    Use a dual-polling strategy. Call BOTH in parallel every 30 seconds:
+
+    Primary — SonarQube MCP (more reliable):
+      get_project_quality_gate_status(projectKey: "Aadhin_mmstudio", pullRequest: "<PR_NUMBER>")
+      - Returns quality gate data → analysis is COMPLETE
+      - Returns error "not found" → analysis NOT READY yet, keep polling
+
+    Secondary — GitHub MCP:
+      pull_request_read(method: "get_status", owner: "aadhin", repo: "mmstudio", pullNumber: <PR_NUMBER>)
+      - state: "success" → CI passed
+      - state: "failure" → CI failed, investigate
+      - state: "pending" → still running
+
+    IMPORTANT GOTCHA: GitHub status API reports "commit statuses" but
+    SonarCloud uses "check runs" (different API). So GitHub status may
+    stay "pending" even after SonarCloud finishes. ALWAYS trust the
+    SonarQube MCP result over GitHub status.
+
+    Polling pattern:
+      sleep 30 → check both → if sonar has data, STOP → else repeat
+      Max 10 iterations (5 minutes). If still pending after 5 min, ask user.
+
+    DO NOT call sleep and MCP in the same tool call — they are sequential.
+    Pattern:
+      1. Bash: sleep 30
+      2. MCP: get_project_quality_gate_status + pull_request_read (parallel)
+      3. Check results, repeat if needed
+
+  STEP 7: PULL FULL REPORT
+    Once quality gate returns data, call:
+      search_sonar_issues_in_projects(
+        projects: ["Aadhin_mmstudio"],
+        pullRequestId: "<PR_NUMBER>"
+      )
+
+  STEP 8: PRESENT RESULTS
+    Format as two tables:
+    1. Quality Gate table: condition | status | threshold | actual
+    2. Issues table: severity | rule | line | file | message
+    Sort issues by severity: BLOCKER > CRITICAL > MAJOR > MINOR
+
+────────────────────────────────────────────────────────────────────────────────
+PROBLEMS I FACED — SO YOU DON'T REPEAT THEM
+────────────────────────────────────────────────────────────────────────────────
+
+  1. GIT AUTH FAILURE
+     Symptom: "could not read Username for 'https://github.com'"
+     Cause: git remote URL has no credentials embedded
+     Fix: set-url with PAT embedded. Non-interactive terminal can't prompt.
+
+  2. BRANCH CONFUSION
+     Symptom: sonar-project.properties says "frontend/src" but branch has no such dir
+     Cause: sonar config and workflow live on main. Feature branch has different files.
+     Key insight: sonar.sources in sonar-project.properties is evaluated on the
+     PR's HEAD commit, not the base branch. So if your feature branch doesn't
+     have the directories listed in sonar.sources, it WILL fail.
+     Fix: make sure sonar.sources covers dirs that exist in your branch.
+
+  3. GITHUB STATUS vs CHECK RUNS
+     Symptom: poll_request_read(get_status) returns "pending" forever
+     Cause: SonarCloud reports via GitHub Check Runs, not Commit Statuses.
+     The get_status method checks commit statuses (different API).
+     Fix: use SonarQube MCP as primary polling method. It directly checks
+     if SonarCloud has processed the analysis.
+
+  4. APPROVAL FATIGUE
+     Symptom: user has to approve every git command, every sleep, every MCP call
+     Cause: default Claude Code permissions require approval for everything
+     Fix: configure allowedTools (see REDUCING USER APPROVALS section above)
+
+  5. PUSHING TO WRONG BRANCH
+     Symptom: accidentally pushed test code to develop-go
+     Cause: was on develop-go branch when creating test files
+     Fix: ALWAYS create a dedicated feature branch. Never use main/develop.
+
+  6. MCP SERVER NOT LOADED
+     Symptom: MCP tools not available in tool list
+     Cause: MCP servers only load on Claude Code startup
+     Fix: restart Claude Code. Also verify Docker images are pulled.
+
+  7. SONARCLOUD AUTOMATIC ANALYSIS CONFLICT
+     Symptom: "You are running CI analysis while Automatic Analysis is enabled"
+     Cause: can't run both CI and automatic analysis
+     Fix: disable Automatic Analysis in SonarCloud UI. This CANNOT be done
+     via MCP — it's a manual browser step (one-time).
+
+  8. SONAR TOKEN SCOPE
+     Symptom: "Project not found" during scanner execution
+     Cause: using a generic user token instead of project-scoped token
+     Fix: generate a Project Analysis Token in SonarCloud (My Account → Security)
+
+  9. GITHUB PAT MISSING PERMISSIONS
+     The fine-grained PAT needs ALL of these:
+       - Contents: Read and Write (push files)
+       - Workflows: Read and Write (create .github/workflows/ files)
+       - Actions: Read and Write (manage workflow runs)
+       - Pull requests: Read and Write (create PRs)
+       - Commit statuses: Read (poll CI status)
+       - Metadata: Read (required)
+     Missing ANY of these causes 403 errors at different stages.
+     The most commonly missed: Workflows and Commit statuses.
+
+────────────────────────────────────────────────────────────────────────────────
+WHAT YOU CAN AND CANNOT DO
+────────────────────────────────────────────────────────────────────────────────
+
+  YOU CAN:
+    ✓ Commit and push code
+    ✓ Create branches and PRs
+    ✓ Poll for CI completion
+    ✓ Pull quality gate status and issues from SonarCloud
+    ✓ Read issue details (severity, rule, file, line)
+    ✓ Fix issues, push again, re-poll (fix loop)
+    ✓ Analyze code snippets locally via SonarQube MCP
+
+  YOU CANNOT:
+    ✗ Trigger a GitHub Actions re-run (no MCP tool for this)
+    ✗ Create GitHub secrets (security restriction)
+    ✗ Change SonarCloud settings (analysis method, branch config)
+    ✗ Access branch analysis on free tier (only main + PRs)
+    ✗ Monitor workflow logs in real-time
+
+  WORKAROUNDS:
+    - To re-trigger CI: push an empty commit or amend and force-push
+    - To check logs: ask user to paste the error from GitHub Actions UI
+    - For branch analysis: use PR-based analysis instead (free tier)
