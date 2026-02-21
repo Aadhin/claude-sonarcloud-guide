@@ -1,0 +1,39 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git status:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git push:*)",
+      "Bash(git fetch:*)",
+      "Bash(git checkout:*)",
+      "Bash(git stash:*)",
+      "Bash(git branch:*)",
+      "Bash(git log:*)",
+      "Bash(git diff:*)",
+      "Bash(git diff-tree:*)",
+      "Bash(git remote:*)",
+      "Bash(git pull:*)",
+      "Bash(sleep:*)",
+      "Bash(docker pull:*)",
+      "Bash(docker images:*)",
+      "mcp__sonarqube__get_project_quality_gate_status",
+      "mcp__sonarqube__search_sonar_issues_in_projects",
+      "mcp__sonarqube__search_my_sonarqube_projects",
+      "mcp__sonarqube__get_component_measures",
+      "mcp__sonarqube__show_rule",
+      "mcp__sonarqube__analyze_code_snippet",
+      "mcp__github__get_me",
+      "mcp__github__get_file_contents",
+      "mcp__github__create_or_update_file",
+      "mcp__github__push_files",
+      "mcp__github__create_branch",
+      "mcp__github__create_pull_request",
+      "mcp__github__pull_request_read",
+      "mcp__github__update_pull_request",
+      "mcp__github__list_commits",
+      "mcp__github__get_commit",
+      "mcp__github__list_branches"
+    ]
+  }
+}
