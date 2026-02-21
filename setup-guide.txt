@@ -1,0 +1,528 @@
+================================================================================
+  GUIDE: SonarCloud Code Analysis with Claude Code + MCP
+  A practical walkthrough from zero to automated quality reports
+================================================================================
+
+Written from real experience setting up SonarCloud analysis for a Go + React/
+TypeScript desktop app (Wails v2) using Claude Code's MCP (Model Context
+Protocol) ecosystem.
+
+────────────────────────────────────────────────────────────────────────────────
+TABLE OF CONTENTS
+────────────────────────────────────────────────────────────────────────────────
+
+  1. What We Built
+  2. Prerequisites
+  3. Setting Up SonarCloud
+  4. Adding the SonarQube MCP Server to Claude Code
+  5. Adding the GitHub MCP Server to Claude Code
+  6. Creating the GitHub Actions Workflow
+  7. Connecting the Dots: First Scan
+  8. Reading Reports via MCP
+  9. Challenges & Gotchas (What Went Wrong)
+  10. What MCP Can and Can't Do
+  11. Free Tier Limitations
+  12. Tips & Best Practices
+
+================================================================================
+1. WHAT WE BUILT
+================================================================================
+
+The goal: Use Claude Code to set up, trigger, and read SonarCloud code quality
+reports — all from the terminal, without constantly switching to browser UIs.
+
+The stack:
+  - Claude Code (CLI) — the orchestrator
+  - SonarQube MCP Server — reads SonarCloud project data, issues, quality gates
+  - GitHub MCP Server — creates files, pushes commits, manages repo from Claude
+  - GitHub Actions — runs the actual sonar-scanner on push
+  - SonarCloud — hosts the analysis results (free tier)
+
+The flow:
+  You write code → push to GitHub → GitHub Actions runs sonar-scanner →
+  SonarCloud analyzes → Claude reads the report via SonarQube MCP
+
+================================================================================
+2. PREREQUISITES
+================================================================================
+
+Before starting, you need:
+
+  [ ] Claude Code installed (npm install -g @anthropic-ai/claude-code)
+  [ ] Docker installed and running (MCP servers run as Docker containers)
+  [ ] A GitHub account with a repository (public or private)
+  [ ] A SonarCloud account (https://sonarcloud.io — free for public repos,
+      limited free tier for private repos)
+
+================================================================================
+3. SETTING UP SONARCLOUD
+================================================================================
+
+Step 1: Create a SonarCloud Account
+  - Go to https://sonarcloud.io
+  - Sign up with your GitHub account
+  - Create or join an organization (e.g., "aadhin")
+
+Step 2: Import Your Project
+  IMPORTANT: Use the "Import from GitHub" flow, not manual project creation.
+  - Click "+" → "Analyze new project"
+  - Select your GitHub repository
+  - This automatically:
+    * Sets the correct project key (e.g., "Aadhin_mmstudio")
+    * Binds the project to your GitHub repo
+    * Configures DevOps Platform Integration
+
+Step 3: Disable Automatic Analysis
+  - Go to your project → Administration → Analysis Method
+  - Toggle OFF "Automatic Analysis"
+  - Why? Automatic Analysis conflicts with CI-based analysis (GitHub Actions).
+    You'll get an error: "You are running CI analysis while Automatic Analysis
+    is enabled." You can only use one or the other.
+
+Step 4: Generate a Project Analysis Token
+  - Go to My Account → Security → Generate Tokens
+  - Name: something like "myproject-ci"
+  - Type: Choose "Project Analysis Token" if available, or "User Token"
+  - Copy the token — you'll need it for GitHub Actions secrets
+
+  NOTE: We initially used a generic user token and got "Project not found"
+  errors. Generating a project-specific token fixed it.
+
+Step 5: Note Your Project Key
+  - The MCP server uses this to query your project
+  - Format is usually: OrgName_reponame (e.g., "Aadhin_mmstudio")
+  - Verify via: SonarCloud → Your Project → Information (bottom-left)
+
+================================================================================
+4. ADDING THE SONARQUBE MCP SERVER TO CLAUDE CODE
+================================================================================
+
+The SonarQube MCP server lets Claude read your SonarCloud data — quality gates,
+issues, metrics, rules — all without leaving the terminal.
+
+Step 1: Pull the Docker image
+  $ docker pull mcp/sonarqube
+
+Step 2: Add the MCP server to Claude Code
+  Run this from your terminal (NOT inside Claude Code):
+
+  $ claude mcp add sonarqube \
+      --env SONARQUBE_TOKEN=<your-sonarcloud-token> \
+      --env SONARQUBE_ORG=<your-org-name> \
+      -- docker run -i --rm \
+         -e SONARQUBE_TOKEN \
+         -e SONARQUBE_ORG \
+         mcp/sonarqube
+
+Step 3: Restart Claude Code
+  The MCP server only loads on startup. After adding it, exit and relaunch
+  Claude Code from your project directory.
+
+Step 4: Verify
+  Ask Claude: "List my SonarCloud projects"
+  Claude will use the MCP tool and return your project list.
+
+What this MCP server CAN do:
+  - List projects in your org
+  - Get quality gate status
+  - Search issues (by severity, status, file, etc.)
+  - Get component measures (coverage, complexity, etc.)
+  - Show rule details
+  - Analyze code snippets locally (limited)
+
+What this MCP server CANNOT do:
+  - Trigger a scan (scans are done via CI, not MCP)
+  - Change project settings (analysis method, branch config, etc.)
+  - Create or delete projects
+  - Manage tokens or permissions
+
+================================================================================
+5. ADDING THE GITHUB MCP SERVER TO CLAUDE CODE
+================================================================================
+
+The GitHub MCP server lets Claude interact with your GitHub repos — create
+files, push commits, manage PRs, read issues — directly from the terminal.
+
+Why you want this:
+  We needed to create a GitHub Actions workflow file (.github/workflows/*.yml)
+  and push it to the repo. Without the GitHub MCP, you'd have to do this
+  manually or use local git commands. With MCP, Claude does it all.
+
+Step 1: Create a GitHub Personal Access Token (PAT)
+  - Go to GitHub → Settings → Developer Settings → Personal Access Tokens
+  - Choose "Fine-grained tokens" (more secure)
+  - Scope it to your specific repository
+  - Permissions needed:
+    * Contents: Read and Write (to create/push files)
+    * Workflows: Read and Write (CRITICAL — needed for .github/workflows/)
+    * Actions: Read and Write (to manage workflow runs)
+    * Metadata: Read (required by default)
+
+  IMPORTANT: Without the "Workflows" permission, you'll get a 403 error when
+  trying to create files under .github/workflows/. This caught us off guard.
+
+Step 2: Pull the Docker image
+  $ docker pull ghcr.io/github/github-mcp-server
+
+Step 3: Add the MCP server to Claude Code
+  $ claude mcp add github \
+      -e GITHUB_PERSONAL_ACCESS_TOKEN=<your-pat> \
+      -- docker run -i --rm \
+         -e GITHUB_PERSONAL_ACCESS_TOKEN \
+         ghcr.io/github/github-mcp-server
+
+Step 4: Restart Claude Code
+
+Step 5: Verify
+  Ask Claude: "Who am I on GitHub?"
+  Claude will call the get_me tool and show your GitHub profile.
+
+What this MCP server CAN do:
+  - Create, read, update, delete files in repos
+  - Push multiple files in a single commit
+  - Create branches, PRs, issues
+  - Search code, issues, PRs, users
+  - Read commit history, diffs, PR reviews
+  - Merge pull requests
+
+What this MCP server CANNOT do:
+  - Create GitHub Actions secrets (security restriction)
+  - List or trigger workflow runs (no tool for this)
+  - Manage repository settings (branch protection, etc.)
+
+================================================================================
+6. CREATING THE GITHUB ACTIONS WORKFLOW
+================================================================================
+
+Two files are needed in your repo:
+
+File 1: sonar-project.properties (in repo root)
+────────────────────────────────────────────────
+  sonar.projectKey=YourOrg_yourrepo
+  sonar.organization=yourorg
+
+  # Point to your source directories
+  sonar.sources=frontend/src,internal
+
+  # Exclude non-source files
+  sonar.exclusions=**/node_modules/**,**/dist/**,build/**
+
+  sonar.sourceEncoding=UTF-8
+
+File 2: .github/workflows/sonarcloud.yml
+────────────────────────────────────────
+  name: SonarCloud Analysis
+
+  on:
+    push:
+      branches: [main]
+    pull_request:
+      branches: [main]
+
+  jobs:
+    sonarcloud:
+      name: SonarCloud Scan
+      runs-on: ubuntu-latest
+      steps:
+        - uses: actions/checkout@v4
+          with:
+            fetch-depth: 0
+
+        - name: SonarCloud Scan
+          uses: SonarSource/sonarqube-scan-action@v5
+          env:
+            SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+
+Claude can create both files using the GitHub MCP's push_files or
+create_or_update_file tools — no manual file creation needed.
+
+THEN: Add the SONAR_TOKEN secret manually
+  - Go to GitHub → Your Repo → Settings → Secrets and variables → Actions
+  - Click "New repository secret"
+  - Name: SONAR_TOKEN
+  - Value: your SonarCloud token
+
+  Why manual? GitHub doesn't allow creating secrets via PATs for security
+  reasons. This is the one step you MUST do in the browser.
+
+================================================================================
+7. CONNECTING THE DOTS: FIRST SCAN
+================================================================================
+
+Once everything is set up:
+  1. Push a commit to the configured branch (or Claude pushes via GitHub MCP)
+  2. GitHub Actions triggers the SonarCloud Analysis workflow
+  3. sonar-scanner runs, uploads results to SonarCloud
+  4. Ask Claude to pull the report:
+     "Show me the SonarCloud quality gate and issues for my project"
+
+Claude uses the SonarQube MCP to call:
+  - get_project_quality_gate_status → overall pass/fail
+  - search_sonar_issues_in_projects → detailed issue list
+
+================================================================================
+8. READING REPORTS VIA MCP
+================================================================================
+
+Once SonarCloud has analysis data, here's what you can ask Claude:
+
+  "What's the quality gate status?"
+    → Uses: get_project_quality_gate_status
+
+  "Show me all blocker and critical issues"
+    → Uses: search_sonar_issues_in_projects with severity filter
+
+  "What issues are in file X?"
+    → Uses: search_sonar_issues_in_projects with file filter
+
+  "Show me the details of rule S2068"
+    → Uses: show_rule
+
+  "What's the code coverage for my project?"
+    → Uses: get_component_measures with metricKeys: ["coverage"]
+
+  "Analyze this code snippet for issues"
+    → Uses: analyze_code_snippet (local analysis, no CI needed)
+
+================================================================================
+9. CHALLENGES & GOTCHAS (WHAT WENT WRONG)
+================================================================================
+
+Here's every issue we hit, in order, and how we fixed it:
+
+CHALLENGE 1: MCP server not connecting
+  Problem: Added MCP server via `claude mcp add` but tools weren't available.
+  Cause: MCP servers load on Claude Code startup only.
+  Fix: Restart Claude Code after adding any MCP server.
+
+CHALLENGE 2: Docker image not pulled
+  Problem: MCP server config was correct but server wouldn't start.
+  Cause: The Docker image (mcp/sonarqube) wasn't pulled locally.
+  Fix: Run `docker pull mcp/sonarqube` before using the server.
+
+CHALLENGE 3: SonarCloud "Project not found" error
+  Problem: Scanner ran but couldn't find the project.
+  Cause: The SONAR_TOKEN was a generic user token without proper project scope.
+  Fix: Generated a new "Project Analysis Token" scoped to the specific project
+  in SonarCloud → My Account → Security.
+
+CHALLENGE 4: GitHub Actions 403 on workflow file
+  Problem: Claude couldn't create .github/workflows/sonarcloud.yml via MCP.
+  Cause: GitHub PAT was missing the "Workflows" permission.
+  Fix: Updated the fine-grained PAT to add "Workflows: Read and Write".
+
+CHALLENGE 5: "Invalid value of sonar.sources" error
+  Problem: Scanner failed because source directories didn't exist.
+  Cause: sonar-project.properties referenced directories (frontend/src, internal)
+  that didn't exist on the main branch (they were only on develop-go).
+  Fix: Updated sonar.sources to point to directories that exist on the branch
+  being scanned.
+
+CHALLENGE 6: "Automatic Analysis is enabled" conflict
+  Problem: CI scan failed with conflict error.
+  Cause: SonarCloud had "Automatic Analysis" enabled AND we were running CI
+  analysis. Can't do both.
+  Fix: Disabled Automatic Analysis in SonarCloud → Administration → Analysis
+  Method. (This can't be done via MCP — browser only.)
+
+CHALLENGE 7: Free tier doesn't support branch analysis
+  Problem: Quality gate returned 404 for develop-go branch.
+  Cause: SonarCloud free tier only analyzes the default/main branch.
+  Fix: Ran analysis on the main branch instead. For real projects, either
+  change the default branch or upgrade to a paid plan.
+
+CHALLENGE 8: Automatic Analysis not compatible with Go
+  Problem: Tried to use Automatic Analysis first to avoid CI setup.
+  Cause: SonarCloud's Automatic Analysis doesn't support Go (or any compiled
+  language). It only works for JS/TS, Python, Java, C#, etc.
+  Fix: Used GitHub Actions CI approach instead.
+
+================================================================================
+10. WHAT MCP CAN AND CAN'T DO — HONEST ASSESSMENT
+================================================================================
+
+FEATURES WE USED EFFECTIVELY:
+  - SonarQube MCP: search_my_sonarqube_projects → verified project exists
+  - SonarQube MCP: get_project_quality_gate_status → got pass/fail status
+  - SonarQube MCP: search_sonar_issues_in_projects → full issue report
+  - SonarQube MCP: analyze_code_snippet → local analysis (useful for quick
+    checks before pushing)
+  - GitHub MCP: get_me → verified PAT connection
+  - GitHub MCP: create_or_update_file → pushed sonar config and workflow
+  - GitHub MCP: push_files → pushed multiple files in one commit
+  - GitHub MCP: get_file_contents → read existing files to check state
+  - GitHub MCP: list_commits → verified commits landed
+
+FEATURES WE COULDN'T USE (LIMITATIONS):
+  - No way to trigger GitHub Actions workflow runs via MCP
+  - No way to list/check workflow run status via MCP
+  - No way to create GitHub Actions secrets via MCP (security restriction)
+  - No way to change SonarCloud settings via MCP (analysis method, branches)
+  - No way to create/delete SonarCloud projects via MCP
+  - Branch analysis not available on free tier
+
+FEATURES WE MISUSED:
+  - analyze_code_snippet: We initially tried to scan files one-by-one using
+    this tool. While it works for quick local checks, it's NOT a substitute
+    for a full SonarCloud scan. The local analyzer has fewer rules and no
+    project context. Use it for quick feedback, not for reports.
+  - Tried to scan all changed files individually — wasteful. The CI pipeline
+    approach is the right way; MCP is for reading results, not running scans.
+
+FEATURES WE DIDN'T USE (BUT COULD):
+  - SonarQube MCP: get_component_measures — for coverage, complexity metrics
+  - SonarQube MCP: show_rule — to understand why a rule exists
+  - SonarQube MCP: get_scm_info — to see who introduced an issue
+  - SonarQube MCP: create_webhook — to get notified on analysis completion
+  - GitHub MCP: pull_request_review_write — could add review comments based
+    on sonar findings (e.g., comment on exact lines with sonar issues)
+  - Combined workflow: Claude reads sonar issues → fixes them → pushes fix →
+    creates PR. Full automation loop.
+
+FEATURES WE ENDED UP USING (after initial assessment):
+  - GitHub MCP: create_branch → created feature branch for PR testing
+  - GitHub MCP: create_pull_request → opened PR #1 to test PR analysis
+  - SonarQube MCP: get_project_quality_gate_status(pullRequest) → PR gate
+  - SonarQube MCP: search_sonar_issues_in_projects(pullRequestId) → PR issues
+
+THE HELPFULNESS OF HAVING GITHUB MCP:
+  Having the GitHub MCP alongside SonarQube MCP was a game-changer. Without it,
+  we would have had to:
+  - Manually create the workflow YAML file
+  - Manually create sonar-project.properties
+  - Manually push commits to trigger scans
+  - Switch between terminal and browser constantly
+
+  With GitHub MCP, Claude created files, pushed commits, and triggered the
+  pipeline — all from one conversation. The only browser steps were:
+  1. Disabling Automatic Analysis in SonarCloud
+  2. Adding the SONAR_TOKEN secret in GitHub
+  Both are security-sensitive operations that intentionally require browser UI.
+
+================================================================================
+11. FREE TIER LIMITATIONS
+================================================================================
+
+SonarCloud Free Tier (as of 2026):
+
+  Line Limit:
+    - Private repos: 50,000 lines of code analyzed for free
+    - Public repos: Unlimited
+    - Lines are counted across ALL projects in your org
+
+  Branch Analysis:
+    - Free tier: ONLY the default branch (usually main)
+    - Non-default branches return 404 errors
+    - Workaround: Change your default branch in SonarCloud, or merge to main
+
+  Automatic Analysis:
+    - Only supports: JavaScript, TypeScript, Python, Java, C#, HTML, CSS
+    - Does NOT support: Go, Rust, C++, Kotlin (need CI-based analysis)
+    - Conflicts with CI analysis — pick one, not both
+
+  Pull Request Analysis:
+    - Available on free tier
+    - Shows new issues introduced by the PR
+    - Great for code review integration
+
+  Tips to Stay Under 50k:
+    - Use sonar.exclusions to skip generated code, vendor, node_modules
+    - Only scan directories that matter (source code, not configs)
+    - Monitor with: get_component_measures + metricKey "ncloc"
+
+================================================================================
+12. TIPS & BEST PRACTICES
+================================================================================
+
+  1. Start with the CI approach (GitHub Actions), not Automatic Analysis.
+     It's more reliable and supports all languages.
+
+  2. Use project-scoped tokens, not user tokens. They have the right
+     permissions and don't break when someone leaves the team.
+
+  3. Scope your GitHub PAT to the specific repo with minimum permissions.
+     Always include "Workflows" permission if you need to create workflow files.
+
+  4. Keep sonar.sources accurate. If directories don't exist on a branch,
+     the scanner will fail hard.
+
+  5. Use analyze_code_snippet for quick local checks before pushing.
+     Use CI + search_sonar_issues_in_projects for real reports.
+
+  6. Set up both MCP servers (SonarQube + GitHub) together. They complement
+     each other — GitHub MCP for triggering, SonarQube MCP for reading.
+
+  7. Remember: MCP servers load on Claude Code startup. Always restart after
+     adding a new server.
+
+  8. For private repos on free tier, be strategic about what you scan.
+     Exclude tests, generated code, and vendor directories to stay under 50k.
+
+================================================================================
+13. PR ANALYSIS — THE FULL LOOP IN ACTION
+================================================================================
+
+We tested the complete end-to-end workflow: Claude creates a branch, pushes
+buggy code, opens a PR, CI runs SonarCloud scan, Claude pulls the PR report.
+
+Step-by-step what happened:
+
+  1. Claude created branch `feature/test-sonar-pr` from main (GitHub MCP)
+  2. Claude pushed `test-dummy/buggy-extra.ts` with intentional bugs (GitHub MCP)
+  3. Claude created PR #1 targeting main (GitHub MCP)
+  4. GitHub Actions triggered SonarCloud scan on the PR
+  5. Claude pulled the PR quality gate and issues (SonarQube MCP)
+
+PR #1 QUALITY GATE RESULT: FAILED
+────────────────────────────────────────────────────────────────────────────────
+  | Condition          | Status | Threshold | Actual |
+  |--------------------|--------|-----------|--------|
+  | Reliability        | OK     | A         | A      |
+  | Security           | OK     | A         | A      |
+  | Maintainability    | FAILED | A         | B      |
+  | Coverage           | FAILED | 80%       | 0%     |
+  | Duplicated Lines   | OK     | 3%        | 0%     |
+  | Security Hotspots  | OK     | 100%      | 100%   |
+
+PR #1 ISSUES: 8 new issues found
+────────────────────────────────────────────────────────────────────────────────
+  | Severity | Rule  | Line | Issue                                    |
+  |----------|-------|------|------------------------------------------|
+  | CRITICAL | S3504 | 49   | var used — use let or const               |
+  | CRITICAL | S3504 | 50   | var used — use let or const               |
+  | MAJOR    | S107  | 23   | Too many params (8, max 7)               |
+  | MAJOR    | S3358 | 32   | Nested ternary — extract to statement    |
+  | MAJOR    | S3358 | 32   | Nested ternary — extract to statement    |
+  | MAJOR    | S4144 | 42   | Duplicate function (identical to line 36) |
+  | MINOR    | S7772 | 11   | Prefer node:fs over fs                   |
+  | MINOR    | S7772 | 12   | Prefer node:path over path               |
+
+KEY INSIGHT: PR analysis works on the free tier!
+  Unlike branch analysis (which requires paid tier), PR analysis is available
+  for free. SonarCloud analyzes only the NEW code introduced by the PR, which:
+  - Counts fewer lines against your 50k limit
+  - Shows only issues YOU introduced (not existing tech debt)
+  - Integrates with GitHub PR checks (green/red status)
+
+  This makes PR-based analysis the best strategy for free tier users.
+
+================================================================================
+END OF GUIDE
+================================================================================
+
+Setup Time: ~30 minutes (including troubleshooting)
+Files Created: 2 (sonar-project.properties + .github/workflows/sonarcloud.yml)
+Browser Steps: 3 (add GitHub secret + disable automatic analysis + update PAT)
+Everything Else: Done via Claude Code + MCP
+
+The dream workflow:
+  $ claude
+  > "Run sonar analysis on my latest changes and show me the issues"
+  Claude: pushes code → triggers CI → waits → pulls report → shows issues
+
+  We're 90% there. The PR workflow completes the loop — Claude creates the
+  branch, pushes code, opens the PR, and reads the report. The only manual
+  step is waiting for CI to finish (no MCP tool to monitor workflow runs yet).
+
+  For the best free-tier experience: use PR-based analysis. It scans only
+  new code, works on free tier, and gives you per-PR quality gates.
